@@ -2,6 +2,7 @@ import pandas as pd
 import tkinter as tk
 from tkinter import filedialog
 import os
+import re
 
 def procesar_archivo():
     # Seleccionar archivo de origen
@@ -18,8 +19,8 @@ def procesar_archivo():
         return
     
     try:
-        # Leer el archivo Excel
-        df = pd.read_excel(archivo_origen, sheet_name='MayorDeCuentas')
+        # Leer el archivo Excel saltando las primeras 2 filas (títulos)
+        df = pd.read_excel(archivo_origen, sheet_name='MayorDeCuentas', skiprows=1)
         
         # Identificar las filas que son encabezados de cuenta (contienen '2.1.1.4.1.')
         es_cuenta = df['Número'].astype(str).str.contains(r'^2\.1\.1\.4\.1\.\d+$', na=False)
@@ -49,53 +50,62 @@ def procesar_archivo():
             
             registros_filtrados = registros_cuenta[filtro_benef & filtro_no_cut].copy()
             
-            # Calcular suma de Haber (convertir a numérico por si hay formatos de texto)
+            # Convertir Haber a numérico (manejar puntos como separadores de miles y comas como decimales)
             registros_filtrados['Haber'] = pd.to_numeric(
-                registros_filtrados['Haber'].astype(str).str.replace('.', '').str.replace(',', '.'),
+                registros_filtrados['Haber'].astype(str)
+                .str.replace('.', '', regex=False)
+                .str.replace(',', '.', regex=False),
                 errors='coerce'
             )
-            suma_haber = registros_filtrados['Haber'].sum()
             
-            # Agregar al resultado
-            resultados.append({
-                'Cuenta': cuenta,
-                'Cantidad de Movimientos': len(registros_filtrados),
-                'Suma Haber': suma_haber,
-                'Registros': registros_filtrados[['Fecha', 'Número', 'Detalle', 'Haber']]
-            })
-        
-        # Generar archivo de salida
-        nombre_base = os.path.splitext(os.path.basename(archivo_origen))[0]
-        archivo_salida = f"{nombre_base}_resultados.xlsx"
-        
-        with pd.ExcelWriter(archivo_salida) as writer:
-            for resultado in resultados:
-                # Usar el código de cuenta como nombre de hoja (reemplazando puntos por guiones)
-                nombre_hoja = str(resultado['Cuenta']).replace('.', '_')[:31]
+            # Filtrar solo registros con valores positivos en Haber (movimientos reales)
+            registros_con_movimiento = registros_filtrados[registros_filtrados['Haber'] > 0]
+            
+            # Solo agregar al resultado si hay movimientos
+            if len(registros_con_movimiento) > 0:
+                suma_haber = registros_con_movimiento['Haber'].sum()
                 
-                # Crear DataFrames para el resumen y los registros
-                resumen_df = pd.DataFrame({
-                    'Cuenta': [resultado['Cuenta']],
-                    'Cantidad de Movimientos': [resultado['Cantidad de Movimientos']],
-                    'Suma Haber': [resultado['Suma Haber']]
+                resultados.append({
+                    'Cuenta': cuenta,
+                    'Cantidad de Movimientos': len(registros_con_movimiento),
+                    'Suma Haber': suma_haber,
+                    'Registros': registros_con_movimiento[['Fecha', 'Número', 'Detalle', 'Haber']]
                 })
-                
-                # Escribir resumen
-                resumen_df.to_excel(writer, sheet_name=nombre_hoja, index=False)
-                
-                # Escribir registros detallados
-                resultado['Registros'].to_excel(
-                    writer,
-                    sheet_name=nombre_hoja,
-                    startrow=len(resumen_df) + 2,
-                    index=False
-                )
         
-        print(f"Procesamiento completado. Resultados guardados en: {archivo_salida}")
+        # Generar archivo de salida solo si hay resultados
+        if resultados:
+            nombre_base = os.path.splitext(os.path.basename(archivo_origen))[0]
+            archivo_salida = f"{nombre_base}_mayores.xlsx"
+            
+            with pd.ExcelWriter(archivo_salida) as writer:
+                for resultado in resultados:
+                    # Usar el código de cuenta como nombre de hoja
+                    nombre_hoja = str(resultado['Cuenta']).replace('.', '_')[:31]
+                    
+                    # Crear DataFrames para el resumen
+                    resumen_df = pd.DataFrame({
+                        'Cuenta': [resultado['Cuenta']],
+                        'Movimientos': [resultado['Operaciones']],
+                        'Total retenciones': [resultado['Sumatoria']]
+                    })
+                    
+                    # Escribir resumen
+                    resumen_df.to_excel(writer, sheet_name=nombre_hoja, index=False)
+                    
+                    # Escribir registros detallados
+                    resultado['Registros'].to_excel(
+                        writer,
+                        sheet_name=nombre_hoja,
+                        startrow=len(resumen_df) + 2,
+                        index=False
+                    )
+            
+            print(f"Procesamiento completado. Resultados guardados en: {archivo_salida}")
+        else:
+            print("No se encontraron movimientos para ninguna cuenta.")
         
     except Exception as e:
         print(f"Error al procesar el archivo: {e}")
-        raise  # Esto ayuda a ver el traceback completo durante el desarrollo
 
 if __name__ == "__main__":
     procesar_archivo()
