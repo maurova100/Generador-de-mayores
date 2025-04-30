@@ -4,6 +4,14 @@ from tkinter import filedialog
 import os
 import re
 from pathlib import Path
+import locale
+from decimal import Decimal, InvalidOperation
+
+# Configurar locale para formato numérico
+try:
+    locale.setlocale(locale.LC_ALL, 'es_AR.UTF-8')  # Ajustar según tu región
+except:
+    locale.setlocale(locale.LC_ALL, '')  # Usar configuración regional por defecto
 
 # Diccionario de nombres de cuentas predefinidos
 NOMBRES_CUENTAS = {
@@ -34,14 +42,69 @@ def extraer_beneficiario(detalle):
     if not isinstance(detalle, str):
         return ""
     
-    # Buscar la posición de 'Benef:'
     pos_benef = detalle.find('Benef:')
     if pos_benef == -1:
-        return detalle[:30]  # Si no encuentra 'Benef:', tomar primeros 30 caracteres
+        return detalle[:30]
     
-    # Extraer desde 'Benef:' hasta 30 caracteres después
-    texto = detalle[pos_benef:pos_benef+36]  # 'Benef:' + 30 caracteres
+    texto = detalle[pos_benef:pos_benef+36]
     return texto.strip()
+
+def convertir_a_decimal(valor):
+    """Convierte cualquier formato numérico a Decimal con precisión"""
+    if pd.isna(valor):
+        return Decimal('0')
+    
+    try:
+        if isinstance(valor, (Decimal, float, int)):
+            return Decimal(str(valor))
+        
+        str_valor = str(valor).strip()
+        str_valor = str_valor.replace('$', '').replace(' ', '')
+        
+        # Contar separadores de miles y decimales
+        puntos = str_valor.count('.')
+        comas = str_valor.count(',')
+        
+        if puntos == 1 and comas == 1:
+            # Determinar cuál es el separador decimal
+            if str_valor.rfind('.') > str_valor.rfind(','):
+                # Formato 1.234,56 → 1234.56
+                str_valor = str_valor.replace('.', '').replace(',', '.')
+            else:
+                # Formato 1,234.56 → 1234.56
+                str_valor = str_valor.replace(',', '')
+        elif comas == 1:
+            # Formato 1234,56 → 1234.56
+            str_valor = str_valor.replace(',', '.')
+        elif puntos == 1:
+            # Podría ser 1.234 (mil doscientos treinta y cuatro) o 1.234 (uno punto dos tres cuatro)
+            # Asumimos que es separador de miles si hay exactamente 3 decimales
+            partes = str_valor.split('.')
+            if len(partes) == 2 and len(partes[1]) == 3:
+                # Formato 1.234 → 1234
+                str_valor = str_valor.replace('.', '')
+        
+        return Decimal(str_valor)
+    except (InvalidOperation, ValueError, TypeError):
+        return Decimal('0')
+
+def format_currency(value):
+    """Formatea correctamente valores monetarios según locale"""
+    try:
+        decimal_value = convertir_a_decimal(value)
+        formatted = locale.currency(decimal_value, grouping=True, symbol='$')
+        
+        # Asegurar formato consistente para Argentina (14.041,36)
+        if ',' in formatted and '.' in formatted:
+            # Si el locale no configuró correctamente los separadores
+            parts = formatted.split(',')
+            integer_part = parts[0].replace('.', '').replace('$', '').strip()
+            decimal_part = parts[1][:2]
+            formatted = f"${integer_part}.{decimal_part}"
+        
+        return formatted
+    except:
+        return '$0.00'
 
 def crear_pdf(resultado, escritorio_path):
     """Crea un PDF apaisado con los resultados de una cuenta"""
@@ -54,7 +117,7 @@ def crear_pdf(resultado, escritorio_path):
     # Configurar PDF en orientación apaisada (landscape)
     class PDF(FPDF):
         def __init__(self):
-            super().__init__(orientation='L')  # 'L' para landscape/apaisado
+            super().__init__(orientation='L')
             self.set_auto_page_break(auto=True, margin=15)
         
         def header(self):
@@ -79,13 +142,17 @@ def crear_pdf(resultado, escritorio_path):
     pdf.set_font('Arial', 'B', 12)
     pdf.cell(0, 10, 'Resumen:', 0, 1)
     pdf.set_font('Arial', '', 10)
+    
+    # Formateo correcto del total
+    total_formateado = format_currency(resultado['Suma Haber'])
+    
     pdf.cell(0, 10, f"Cantidad de movimientos: {resultado['Cantidad de Movimientos']}", 0, 1)
-    pdf.cell(0, 10, f"Total Haber: ${resultado['Suma Haber']:,.2f}", 0, 1)
+    pdf.cell(0, 10, f"Total Haber: {total_formateado}", 0, 1)
     pdf.ln(10)
     
     # Tabla de registros (apaisada)
     pdf.set_font('Arial', 'B', 10)
-    col_widths = [25, 25, 60, 30]  # Anchos de columnas ajustados para orientación apaisada
+    col_widths = [25, 25, 60, 30]
     headers = ['Fecha', 'Número', 'Beneficiario (30 chars)', 'Haber']
     
     # Encabezados de tabla
@@ -96,11 +163,10 @@ def crear_pdf(resultado, escritorio_path):
     # Contenido de tabla
     pdf.set_font('Arial', '', 8)
     for _, row in registros.iterrows():
-        # Asegurar que los valores no sean NaN
         fecha = str(row['Fecha']) if pd.notna(row['Fecha']) else ''
         numero = str(row['Número']) if pd.notna(row['Número']) else ''
         beneficiario = extraer_beneficiario(str(row['Detalle'])) if pd.notna(row['Detalle']) else ''
-        haber = f"${row['Haber']:,.2f}" if pd.notna(row['Haber']) else '$0.00'
+        haber = format_currency(row['Haber'])
         
         pdf.cell(col_widths[0], 10, fecha, 1)
         pdf.cell(col_widths[1], 10, numero, 1)
@@ -110,13 +176,13 @@ def crear_pdf(resultado, escritorio_path):
     
     # Guardar PDF
     nombre_archivo = f"Mayor de retenciones - {nombre_cuenta}.pdf"
-    nombre_archivo = re.sub(r'[\\/*?:"<>|]', '', nombre_archivo)  # Eliminar caracteres inválidos
+    nombre_archivo = re.sub(r'[\\/*?:"<>|]', '', nombre_archivo)
     pdf_path = os.path.join(escritorio_path, nombre_archivo)
     pdf.output(pdf_path)
     return pdf_path
 
 def procesar_archivo():
-    """Procesa el archivo Excel y genera los PDFs apaisados"""
+    """Procesa el archivo Excel y genera los PDFs"""
     # Configurar interfaz para seleccionar archivo
     root = tk.Tk()
     root.withdraw()
@@ -155,26 +221,32 @@ def procesar_archivo():
                     siguiente_idx = next_idx[0]
                     break
             
-            # Filtrar registros válidos
+            # Obtener registros para esta cuenta
             registros_cuenta = df.iloc[idx_cuenta+1:siguiente_idx].copy()
-            registros_cuenta['Haber'] = pd.to_numeric(
-                registros_cuenta['Haber'].astype(str).str.replace('.', '').str.replace(',', '.'), 
-                errors='coerce'
+            
+            # Convertir Haber a Decimal para precisión (CORRECCIÓN: paréntesis faltante añadido)
+            registros_cuenta['Haber'] = registros_cuenta['Haber'].apply(
+                lambda x: convertir_a_decimal(x)
             )
             
+            # Filtrar registros válidos
             filtro = (
                 registros_cuenta['Detalle'].str.contains('Benef', na=False, case=False) &
                 ~registros_cuenta['Detalle'].str.contains('CUT', na=False, case=False) &
-                (registros_cuenta['Haber'] > 0))
+                (registros_cuenta['Haber'] > Decimal('0'))
+            )
             
             registros_filtrados = registros_cuenta[filtro].copy()
             
             if len(registros_filtrados) > 0:
+                # Calcular suma con precisión decimal
+                suma_haber = registros_filtrados['Haber'].sum()
+                
                 resultados.append({
                     'Cuenta': cuenta,
                     'NombreCuenta': nombre_cuenta,
                     'Cantidad de Movimientos': len(registros_filtrados),
-                    'Suma Haber': registros_filtrados['Haber'].sum(),
+                    'Suma Haber': float(suma_haber),
                     'Registros': registros_filtrados[['Fecha', 'Número', 'Detalle', 'Haber']]
                 })
         
@@ -196,4 +268,25 @@ def procesar_archivo():
         print(f"Error al procesar el archivo: {str(e)}")
 
 if __name__ == "__main__":
+    # Verificación del formato numérico
+    print("=== Prueba de formato numérico ===")
+    test_values = [
+        '14.041,36',    # Formato europeo
+        '1.234,56',     # Formato europeo
+        '1234,56',      # Formato europeo sin separador de miles
+        '1234.56',      # Formato internacional sin separador de miles
+        '1,234.56',     # Formato internacional
+        '1234',         # Entero
+        1234.56,        # Float
+        'abc',          # Inválido
+        None,           # Nulo
+        '$ 1.234,56',   # Con símbolo de moneda
+        '1.234',        # ¿Mil o uno punto dos tres cuatro?
+        '1.234.567,89', # Formato europeo con múltiples separadores
+    ]
+    
+    for val in test_values:
+        print(f"Original: {val!r:<15} → Decimal: {convertir_a_decimal(val)} → Formateado: {format_currency(val)}")
+    
+    print("\n=== Iniciando procesamiento ===")
     procesar_archivo()
