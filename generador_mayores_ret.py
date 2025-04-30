@@ -4,6 +4,18 @@ from tkinter import filedialog
 import os
 import re
 
+# Diccionario de nombres de cuentas predefinidos
+NOMBRES_CUENTAS = {
+    '2.1.1.4.1.1': 'RETENCIONES IMPUESTO A LAS GANANCIAS',
+    '2.1.1.4.1.14': 'RETENCIONES INGRESOS BRUTOS A PAGAR',
+    '2.1.1.4.1.17': 'RETENCION SEGUROS CONTRATOS F.A',
+    '2.1.1.4.1.57': 'RETENCIONES IVA',
+    '2.1.1.4.1.6': 'RETENCIONES AL SUSS SERVICIO LIMPIEZA',
+    '2.1.1.4.1.7': 'RETENCIONES AL SUSS OBRAS',
+    '2.1.1.4.1.8': 'RETENCIONES AL SUSS RESOLUCION GENERAL',
+    '2.1.1.4.1.9': 'RETENCION SUSS SEGURIDAD'
+}
+
 def procesar_archivo():
     # Seleccionar archivo de origen
     root = tk.Tk()
@@ -19,74 +31,82 @@ def procesar_archivo():
         return
     
     try:
-        # Leer el archivo Excel saltando las primeras 2 filas (títulos)
+        # Leer el archivo Excel omitiendo la primera fila (encabezado combinado)
         df = pd.read_excel(archivo_origen, sheet_name='MayorDeCuentas', skiprows=1)
         
-        # Identificar las filas que son encabezados de cuenta (contienen '2.1.1.4.1.')
+        # Identificar las filas que son encabezados de cuenta
         es_cuenta = df['Número'].astype(str).str.contains(r'^2\.1\.1\.4\.1\.\d+$', na=False)
         cuentas = df[es_cuenta]['Número'].unique()
         
-        print(f"Cuentas contables encontradas: {cuentas}")
+        # Filtrar solo las cuentas que están en nuestro diccionario
+        cuentas_validas = [c for c in cuentas if str(c) in NOMBRES_CUENTAS]
+        
+        print(f"Cuentas contables encontradas: {cuentas_validas}")
         
         resultados = []
         
-        for cuenta in cuentas:
+        for cuenta in cuentas_validas:
+            # Obtener el nombre de la cuenta del diccionario
+            nombre_cuenta = NOMBRES_CUENTAS[str(cuenta)]
+            
             # Encontrar el índice de la fila que contiene la cuenta
             idx_cuenta = df[df['Número'] == cuenta].index[0]
             
             # Encontrar el próximo índice de cuenta para determinar el rango de registros
             siguiente_idx = len(df)
-            for next_cuenta in cuentas:
-                if df[df['Número'] == next_cuenta].index[0] > idx_cuenta:
-                    siguiente_idx = df[df['Número'] == next_cuenta].index[0]
+            for next_cuenta in cuentas_validas:
+                next_idx = df[df['Número'] == next_cuenta].index
+                if len(next_idx) > 0 and next_idx[0] > idx_cuenta:
+                    siguiente_idx = next_idx[0]
                     break
             
             # Obtener los registros entre esta cuenta y la siguiente
             registros_cuenta = df.iloc[idx_cuenta+1:siguiente_idx].copy()
             
-            # Filtrar registros que contengan "Benef" pero no "CUT"
+            # Filtrar registros que contengan "Benef" pero no "CUT" y que tengan valor en Haber
             filtro_benef = registros_cuenta['Detalle'].str.contains('Benef', na=False, case=False)
             filtro_no_cut = ~registros_cuenta['Detalle'].str.contains('CUT', na=False, case=False)
-            
-            registros_filtrados = registros_cuenta[filtro_benef & filtro_no_cut].copy()
-            
-            # Convertir Haber a numérico (manejar puntos como separadores de miles y comas como decimales)
-            registros_filtrados['Haber'] = pd.to_numeric(
-                registros_filtrados['Haber'].astype(str)
-                .str.replace('.', '', regex=False)
-                .str.replace(',', '.', regex=False),
+            registros_cuenta['Haber'] = pd.to_numeric(
+                registros_cuenta['Haber'].astype(str).str.replace('.', '').str.replace(',', '.'), 
                 errors='coerce'
             )
+            filtro_haber = registros_cuenta['Haber'] > 0
             
-            # Filtrar solo registros con valores positivos en Haber (movimientos reales)
-            registros_con_movimiento = registros_filtrados[registros_filtrados['Haber'] > 0]
+            registros_filtrados = registros_cuenta[filtro_benef & filtro_no_cut & filtro_haber].copy()
             
-            # Solo agregar al resultado si hay movimientos
-            if len(registros_con_movimiento) > 0:
-                suma_haber = registros_con_movimiento['Haber'].sum()
-                
-                resultados.append({
-                    'Cuenta': cuenta,
-                    'Cantidad de Movimientos': len(registros_con_movimiento),
-                    'Suma Haber': suma_haber,
-                    'Registros': registros_con_movimiento[['Fecha', 'Número', 'Detalle', 'Haber']]
-                })
+            # Si no hay movimientos, saltar esta cuenta
+            if len(registros_filtrados) == 0:
+                continue
+            
+            # Calcular suma de Haber
+            suma_haber = registros_filtrados['Haber'].sum()
+            
+            # Agregar al resultado
+            resultados.append({
+                'Cuenta': cuenta,
+                'NombreCuenta': nombre_cuenta,
+                'Cantidad de Movimientos': len(registros_filtrados),
+                'Suma Haber': suma_haber,
+                'Registros': registros_filtrados[['Fecha', 'Número', 'Detalle', 'Haber']]
+            })
         
         # Generar archivo de salida solo si hay resultados
         if resultados:
             nombre_base = os.path.splitext(os.path.basename(archivo_origen))[0]
-            archivo_salida = f"{nombre_base}_mayores.xlsx"
+            archivo_salida = f"{nombre_base}_resultados.xlsx"
             
             with pd.ExcelWriter(archivo_salida) as writer:
                 for resultado in resultados:
-                    # Usar el código de cuenta como nombre de hoja
-                    nombre_hoja = str(resultado['Cuenta']).replace('.', '_')[:31]
+                    # Crear nombre de hoja con código y nombre de cuenta
+                    nombre_completo = f"{resultado['Cuenta']} - {resultado['NombreCuenta']}"
+                    nombre_hoja = nombre_completo[:31]
+                    nombre_hoja = re.sub(r'[\\/*?:[\]]', '', nombre_hoja)  # Eliminar caracteres no permitidos
                     
                     # Crear DataFrames para el resumen
                     resumen_df = pd.DataFrame({
-                        'Cuenta': [resultado['Cuenta']],
-                        'Movimientos': [resultado['Operaciones']],
-                        'Total retenciones': [resultado['Sumatoria']]
+                        'Cuenta': [nombre_completo],
+                        'Cantidad de Movimientos': [resultado['Cantidad de Movimientos']],
+                        'Suma Haber': [resultado['Suma Haber']]
                     })
                     
                     # Escribir resumen
@@ -102,7 +122,7 @@ def procesar_archivo():
             
             print(f"Procesamiento completado. Resultados guardados en: {archivo_salida}")
         else:
-            print("No se encontraron movimientos para ninguna cuenta.")
+            print("No se encontraron movimientos que cumplan los criterios especificados.")
         
     except Exception as e:
         print(f"Error al procesar el archivo: {e}")
